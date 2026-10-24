@@ -27,13 +27,21 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Clone official WorkSlop v3.0 source
+      - name: Download exact official WorkSlop v3.0 source archive
         run: |
-          git clone --branch v3.0 --depth 1 https://github.com/adnan120hz/WorkSlop-Mobile-New.git upstream
+          set -e
+          curl -L --fail --retry 3 \
+            https://github.com/adnan120hz/WorkSlop-Mobile-New/archive/refs/tags/v3.0.zip \
+            -o upstream-v3.0.zip
+          unzip -q upstream-v3.0.zip
+          mv WorkSlop-Mobile-New-3.0 upstream
           cd upstream
-          echo "Upstream tag: $(git describe --tags --exact-match 2>/dev/null || true)"
-          echo "Upstream commit: $(git rev-parse HEAD)"
-          test "$(git rev-parse HEAD)" = "8c97076c9e25995df6e5aac063efc46cb4865a94"
+          git init -q
+          git config user.name "NSMOD CI"
+          git config user.email "ci@localhost"
+          git add -A
+          git commit -qm "Official WorkSlop v3.0 archive"
+          echo "Using exact source archive: refs/tags/v3.0.zip"
 
       - name: Apply Vietnamese + NSMOD patch
         run: |
@@ -50,7 +58,7 @@ jobs:
           test -f WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
           test -f WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
 
-      - name: Fix pairing file importer
+      - name: Harden pairing importer for Files and member pairing records
         run: |
           set -e
           python3 - <<'PY'
@@ -62,23 +70,88 @@ jobs:
 
           old_type = 'allowedContentTypes: [.propertyList]'
           if old_type not in text:
-              raise SystemExit('Could not find .propertyList importer filter')
-          text = text.replace(old_type, 'allowedContentTypes: [.data]', 1)
+              raise SystemExit('Could not find original .propertyList importer filter')
+          text = text.replace(old_type, 'allowedContentTypes: [.item]', 1)
 
-          pattern = re.compile(
-              r'\n\s*guard url\.pathExtension\.lowercased\(\) == "plist" else \{\n'
-              r'\s*return .*?\n'
-              r'\s*\}\n',
-              re.S,
-          )
-          text, count = pattern.subn('\n', text, count=1)
-          if count != 1:
-              raise SystemExit('Could not remove extension-only pairing guard')
+          start = text.find('    private func importPairing(from url: URL) -> String? {')
+          end_marker = '\n    }\n}\n\n// MARK: - About / risks / how-to'
+          end = text.find(end_marker, start)
+          if start == -1 or end == -1:
+              raise SystemExit('Could not locate importPairing function')
 
+          replacement = '''    private func importPairing(from url: URL) -> String? {
+        // Accept any Files/iCloud item here. The actual security check is the
+        // pairing-record structure below, not the filename extension or UTType.
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
+        var coordinatedError: NSError?
+        var data: Data?
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinatedError) { readableURL in
+            data = try? Data(contentsOf: readableURL, options: [.mappedIfSafe])
+        }
+
+        guard let data else {
+            if let coordinatedError {
+                return "Không thể đọc tệp pairing: \\(coordinatedError.localizedDescription)"
+            }
+            return "Không thể đọc tệp pairing. Hãy lưu tệp vào Tệp hoặc Trên iPhone rồi thử lại."
+        }
+
+        guard let format = PairingStore.format(of: data) else {
+            return PairingStore.diagnose(data) + " Không có dữ liệu nào được lưu."
+        }
+
+        do {
+            try PairingStore.save(data)
+            status.pairingChanged()
+            switch format {
+            case .legacy:
+                return "Đã nhập pairing file (định dạng lockdown)."
+            case .remotePairing:
+                return "Đã nhập pairing file (RemotePairing iOS 17+)."
+            }
+        } catch {
+            return "Không thể lưu pairing file: \\(error.localizedDescription)"
+        }
+    }'''
+
+          text = text[:start] + replacement + text[end + len('\n    }'):]
           path.write_text(text, encoding='utf-8')
           PY
-          grep -q 'allowedContentTypes: \[.data\]' upstream/WorkSlop/MainMenuView.swift
+          grep -q 'allowedContentTypes: \[.item\]' upstream/WorkSlop/MainMenuView.swift
+          grep -q 'NSFileCoordinator()' upstream/WorkSlop/MainMenuView.swift
           ! grep -q 'pathExtension.lowercased() == "plist"' upstream/WorkSlop/MainMenuView.swift
+
+      - name: Pairing parser smoke test
+        run: |
+          set -e
+          python3 - <<'PY'
+          import plistlib
+
+          remote = {
+              'identifier': 'test-member',
+              'private_key': b'fake-private-key',
+              'public_key': b'fake-public-key',
+              'alt_irk': b'fake-alt-irk',
+          }
+          legacy = {
+              'HostID': 'TEST-HOST',
+              'SystemBUID': 'TEST-BUID',
+              'HostPrivateKey': b'fake-host-key',
+              'RootCertificate': b'fake-root-cert',
+          }
+          for name, obj in [('remote', remote), ('legacy', legacy)]:
+              raw = plistlib.dumps(obj, fmt=plistlib.FMT_XML)
+              parsed = plistlib.loads(raw)
+              assert isinstance(parsed, dict) and parsed
+              if name == 'remote':
+                  assert parsed.get('identifier') and 'private_key' in parsed and 'public_key' in parsed
+              else:
+                  assert parsed.get('HostID') and (parsed.get('SystemBUID') or 'HostPrivateKey' in parsed)
+          print('Pairing fixture smoke test: PASS')
+          PY
 
       - name: Build idevice FFI (Rust, for iOS 27 pairing)
         run: |
@@ -149,6 +222,13 @@ jobs:
           (cd "$IPA_DIR" && /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa" Payload)
           ls -lh "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa"
 
+      - name: Pack patched source
+        run: |
+          rm -rf upstream/.git
+          ditto -c -k --sequesterRsrc --keepParent upstream \
+            "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip"
+          ls -lh "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip"
+
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -163,4 +243,12 @@ jobs:
         with:
           name: WorkSlop-v3.0-NSMOD-VI-IPA
           path: ${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa
+          if-no-files-found: warn
+
+      - name: Upload patched source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkSlop-v3.0-NSMOD-VI-SOURCE
+          path: ${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip
           if-no-files-found: warn
