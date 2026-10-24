@@ -48,6 +48,36 @@ jobs:
           test -f WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
           test -f WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
 
+      - name: Fix pairing file importer
+        run: |
+          set -e
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('upstream/WorkSlop/MainMenuView.swift')
+          text = path.read_text(encoding='utf-8')
+
+          old_type = 'allowedContentTypes: [.propertyList]'
+          if old_type not in text:
+              raise SystemExit('Could not find .propertyList importer filter')
+          text = text.replace(old_type, 'allowedContentTypes: [.data]', 1)
+
+          pattern = re.compile(
+              r'\n\s*guard url\.pathExtension\.lowercased\(\) == "plist" else \{\n'
+              r'\s*return .*?\n'
+              r'\s*\}\n',
+              re.S,
+          )
+          text, count = pattern.subn('\n', text, count=1)
+          if count != 1:
+              raise SystemExit('Could not remove extension-only pairing guard')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          grep -q 'allowedContentTypes: \[.data\]' upstream/WorkSlop/MainMenuView.swift
+          ! grep -q 'pathExtension.lowercased() == "plist"' upstream/WorkSlop/MainMenuView.swift
+
       - name: Build idevice FFI (Rust, for iOS 27 pairing)
         run: |
           set -e
