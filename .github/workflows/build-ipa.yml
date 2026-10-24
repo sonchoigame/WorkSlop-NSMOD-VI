@@ -27,11 +27,13 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Clone official WorkSlop source
+      - name: Clone official WorkSlop v3.0 source
         run: |
-          git clone --depth 1 https://github.com/adnan120hz/WorkSlop-Mobile-New.git upstream
+          git clone --branch v3.0 --depth 1 https://github.com/adnan120hz/WorkSlop-Mobile-New.git upstream
           cd upstream
+          echo "Upstream tag: $(git describe --tags --exact-match 2>/dev/null || true)"
           echo "Upstream commit: $(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD)" = "8c97076c9e25995df6e5aac063efc46cb4865a94"
 
       - name: Apply Vietnamese + NSMOD patch
         run: |
@@ -144,14 +146,14 @@ jobs:
           IPA_DIR="${{ runner.temp }}/ipa-staging"
           mkdir -p "$IPA_DIR/Payload"
           cp -R "$APP" "$IPA_DIR/Payload/"
-          (cd "$IPA_DIR" && /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-NSMOD-VI-unsigned.ipa" Payload)
-          ls -lh "${{ runner.temp }}/WorkSlop-NSMOD-VI-unsigned.ipa"
+          (cd "$IPA_DIR" && /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa" Payload)
+          ls -lh "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa"
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: BuildLog
+          name: BuildLog-v3.0
           path: ${{ runner.temp }}/xcodebuild.log
           if-no-files-found: warn
 
@@ -159,6 +161,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: WorkSlop-NSMOD-VI-IPA
-          path: ${{ runner.temp }}/WorkSlop-NSMOD-VI-unsigned.ipa
+          name: WorkSlop-v3.0-NSMOD-VI-IPA
+          path: ${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa
           if-no-files-found: warn
