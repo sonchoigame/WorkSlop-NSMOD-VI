@@ -11,8 +11,21 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout NSMOD patch repo
+      - name: Checkout NSMOD repo
         uses: actions/checkout@v4
+
+      - name: Checkout official WorkSlop v3.0
+        uses: actions/checkout@v4
+        with:
+          repository: adnan120hz/WorkSlop-Mobile-New
+          ref: v3.0
+          path: upstream
+
+      - name: Verify exact v3.0 source
+        run: |
+          cd upstream
+          test "$(git rev-parse HEAD)" = "8c97076c9e25995df6e5aac063efc46cb4865a94"
+          echo "Exact WorkSlop v3.0 source confirmed"
 
       - name: Select Xcode 26
         uses: maxim-lobanov/setup-xcode@v1
@@ -27,23 +40,7 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Download exact official WorkSlop v3.0 source archive
-        run: |
-          set -e
-          curl -L --fail --retry 3 \
-            https://github.com/adnan120hz/WorkSlop-Mobile-New/archive/refs/tags/v3.0.zip \
-            -o upstream-v3.0.zip
-          unzip -q upstream-v3.0.zip
-          mv WorkSlop-Mobile-New-3.0 upstream
-          cd upstream
-          git init -q
-          git config user.name "NSMOD CI"
-          git config user.email "ci@localhost"
-          git add -A
-          git commit -qm "Official WorkSlop v3.0 archive"
-          echo "Using exact source archive: refs/tags/v3.0.zip"
-
-      - name: Apply Vietnamese + NSMOD patch
+      - name: Apply Vietnamese and NSMOD patch
         run: |
           set -e
           cat payload/patch.b64.* > patch.b64
@@ -52,138 +49,54 @@ jobs:
           cd upstream
           git apply --check ../nsmod.patch
           git apply ../nsmod.patch
-          git diff --stat
           grep -q '@NSMOD' WorkSlop/SettingsView.swift
           test -f WorkSlop/NSMODWelcomeView.swift
           test -f WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
           test -f WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
 
-      - name: Harden pairing importer for Files and member pairing records
+      - name: Harden pairing import
+        run: python3 scripts/harden_pairing.py
+
+      - name: Verify pairing importer source
         run: |
-          set -e
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path('upstream/WorkSlop/MainMenuView.swift')
-          text = path.read_text(encoding='utf-8')
-
-          old_type = 'allowedContentTypes: [.propertyList]'
-          if old_type not in text:
-              raise SystemExit('Could not find original .propertyList importer filter')
-          text = text.replace(old_type, 'allowedContentTypes: [.item]', 1)
-
-          start = text.find('    private func importPairing(from url: URL) -> String? {')
-          end_marker = '\n    }\n}\n\n// MARK: - About / risks / how-to'
-          end = text.find(end_marker, start)
-          if start == -1 or end == -1:
-              raise SystemExit('Could not locate importPairing function')
-
-          replacement = '''    private func importPairing(from url: URL) -> String? {
-        // Accept any Files/iCloud item here. The actual security check is the
-        // pairing-record structure below, not the filename extension or UTType.
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-
-        var coordinatedError: NSError?
-        var data: Data?
-        let coordinator = NSFileCoordinator()
-        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinatedError) { readableURL in
-            data = try? Data(contentsOf: readableURL, options: [.mappedIfSafe])
-        }
-
-        guard let data else {
-            if let coordinatedError {
-                return "Không thể đọc tệp pairing: \\(coordinatedError.localizedDescription)"
-            }
-            return "Không thể đọc tệp pairing. Hãy lưu tệp vào Tệp hoặc Trên iPhone rồi thử lại."
-        }
-
-        guard let format = PairingStore.format(of: data) else {
-            return PairingStore.diagnose(data) + " Không có dữ liệu nào được lưu."
-        }
-
-        do {
-            try PairingStore.save(data)
-            status.pairingChanged()
-            switch format {
-            case .legacy:
-                return "Đã nhập pairing file (định dạng lockdown)."
-            case .remotePairing:
-                return "Đã nhập pairing file (RemotePairing iOS 17+)."
-            }
-        } catch {
-            return "Không thể lưu pairing file: \\(error.localizedDescription)"
-        }
-    }'''
-
-          text = text[:start] + replacement + text[end + len('\n    }'):]
-          path.write_text(text, encoding='utf-8')
-          PY
           grep -q 'allowedContentTypes: \[.item\]' upstream/WorkSlop/MainMenuView.swift
           grep -q 'NSFileCoordinator()' upstream/WorkSlop/MainMenuView.swift
           ! grep -q 'pathExtension.lowercased() == "plist"' upstream/WorkSlop/MainMenuView.swift
+          echo "Pairing importer source checks: PASS"
 
-      - name: Pairing parser smoke test
+      - name: Pairing format smoke test
+        run: |
+          python3 -c "import plistlib; r={'identifier':'member','private_key':b'a','public_key':b'b'}; l={'HostID':'host','SystemBUID':'buid','HostPrivateKey':b'k'}; assert plistlib.loads(plistlib.dumps(r))['identifier']; assert plistlib.loads(plistlib.dumps(l))['HostID']; print('Pairing format smoke test: PASS')"
+
+      - name: Build idevice FFI
         run: |
           set -e
-          python3 - <<'PY'
-          import plistlib
-
-          remote = {
-              'identifier': 'test-member',
-              'private_key': b'fake-private-key',
-              'public_key': b'fake-public-key',
-              'alt_irk': b'fake-alt-irk',
-          }
-          legacy = {
-              'HostID': 'TEST-HOST',
-              'SystemBUID': 'TEST-BUID',
-              'HostPrivateKey': b'fake-host-key',
-              'RootCertificate': b'fake-root-cert',
-          }
-          for name, obj in [('remote', remote), ('legacy', legacy)]:
-              raw = plistlib.dumps(obj, fmt=plistlib.FMT_XML)
-              parsed = plistlib.loads(raw)
-              assert isinstance(parsed, dict) and parsed
-              if name == 'remote':
-                  assert parsed.get('identifier') and 'private_key' in parsed and 'public_key' in parsed
-              else:
-                  assert parsed.get('HostID') and (parsed.get('SystemBUID') or 'HostPrivateKey' in parsed)
-          print('Pairing fixture smoke test: PASS')
-          PY
-
-      - name: Build idevice FFI (Rust, for iOS 27 pairing)
-        run: |
-          set -e
-          if ! command -v cargo &> /dev/null; then
+          if ! command -v cargo >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
             source "$HOME/.cargo/env"
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add aarch64-apple-ios
+          rm -rf /tmp/idevice
           git clone --depth 1 https://github.com/jkcoxson/idevice.git /tmp/idevice
           cd /tmp/idevice/ffi
-          cargo build --target aarch64-apple-ios --release \
-            --no-default-features --features remote_pairing,rustcrypto --lib
+          cargo build --target aarch64-apple-ios --release --no-default-features --features remote_pairing,rustcrypto --lib
           mkdir -p "$GITHUB_WORKSPACE/upstream/WorkSlop/Libs"
-          cp /tmp/idevice/target/aarch64-apple-ios/release/libidevice_ffi.a \
-             "$GITHUB_WORKSPACE/upstream/WorkSlop/Libs/"
+          cp /tmp/idevice/target/aarch64-apple-ios/release/libidevice_ffi.a "$GITHUB_WORKSPACE/upstream/WorkSlop/Libs/"
 
-      - name: Cache AirliftFFI.xcframework
+      - name: Cache AirliftFFI
         id: airlift-cache
         uses: actions/cache@v4
         with:
           path: .ci-cache/AirliftFFI.xcframework
           key: airlift-ffi-40640c4d827aeab8d798285b57d24fcf6be070d0
 
-      - name: Fetch AirliftFFI.xcframework
+      - name: Fetch AirliftFFI
         if: steps.airlift-cache.outputs.cache-hit != 'true'
         run: |
           set -e
           rm -rf /tmp/aircard-xcframework
-          git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/Mak5er/AirCard-iOS.git /tmp/aircard-xcframework
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/Mak5er/AirCard-iOS.git /tmp/aircard-xcframework
           cd /tmp/aircard-xcframework
           git sparse-checkout set AirliftFFI.xcframework
           git checkout --quiet
@@ -195,8 +108,7 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/upstream/WorkSlop/Frameworks"
           rm -rf "$GITHUB_WORKSPACE/upstream/WorkSlop/Frameworks/AirliftFFI.xcframework"
-          cp -R "$GITHUB_WORKSPACE/.ci-cache/AirliftFFI.xcframework" \
-                "$GITHUB_WORKSPACE/upstream/WorkSlop/Frameworks/"
+          cp -R "$GITHUB_WORKSPACE/.ci-cache/AirliftFFI.xcframework" "$GITHUB_WORKSPACE/upstream/WorkSlop/Frameworks/"
 
       - name: Generate project
         working-directory: upstream
@@ -213,21 +125,17 @@ jobs:
             -derivedDataPath ${{ runner.temp }}/DerivedData \
             build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             2>&1 | tee ${{ runner.temp }}/xcodebuild.log
-
           APP="${{ runner.temp }}/DerivedData/Build/Products/Release-iphoneos/WorkSlop.app"
           test -d "$APP"
-          IPA_DIR="${{ runner.temp }}/ipa-staging"
-          mkdir -p "$IPA_DIR/Payload"
-          cp -R "$APP" "$IPA_DIR/Payload/"
-          (cd "$IPA_DIR" && /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa" Payload)
-          ls -lh "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa"
+          mkdir -p "${{ runner.temp }}/ipa-staging/Payload"
+          cp -R "$APP" "${{ runner.temp }}/ipa-staging/Payload/"
+          cd "${{ runner.temp }}/ipa-staging"
+          /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa" Payload
 
       - name: Pack patched source
         run: |
           rm -rf upstream/.git
-          ditto -c -k --sequesterRsrc --keepParent upstream \
-            "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip"
-          ls -lh "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip"
+          ditto -c -k --sequesterRsrc --keepParent upstream "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip"
 
       - name: Upload build log
         if: always()
@@ -238,17 +146,15 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload IPA
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: WorkSlop-v3.0-NSMOD-VI-IPA
           path: ${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa
-          if-no-files-found: warn
 
-      - name: Upload patched source
-        if: always()
+      - name: Upload source
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: WorkSlop-v3.0-NSMOD-VI-SOURCE
           path: ${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip
-          if-no-files-found: warn
