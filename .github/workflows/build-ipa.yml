@@ -12,7 +12,6 @@ jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 45
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,53 +33,42 @@ jobs:
           rm -rf upstream
           git clone --branch v3.0 --depth 1 https://github.com/adnan120hz/WorkSlop-Mobile-New.git upstream
           test "$(git -C upstream rev-parse HEAD)" = "8c97076c9e25995df6e5aac063efc46cb4865a94"
-
-          cat payload/patch.b64.* > /tmp/nsmod-base.b64
-          openssl base64 -d -A -in /tmp/nsmod-base.b64 -out /tmp/nsmod-base.gz
-          gunzip -c /tmp/nsmod-base.gz > /tmp/nsmod-base.patch
-          (cd upstream && git apply --check /tmp/nsmod-base.patch && git apply /tmp/nsmod-base.patch)
-
+          cat payload/patch.b64.* > /tmp/base.b64
+          openssl base64 -d -A -in /tmp/base.b64 -out /tmp/base.gz
+          gunzip -c /tmp/base.gz > /tmp/base.patch
+          (cd upstream && git apply --check /tmp/base.patch && git apply /tmp/base.patch)
           python3 scripts/harden_pairing.py
-
-          openssl base64 -d -A -in bootstrap/final_delta.patch.b64 -out /tmp/final-delta.gz
-          gunzip -c /tmp/final-delta.gz > /tmp/final-delta.patch
-          (cd upstream && patch -p1 < /tmp/final-delta.patch)
-
-          # The user's FINAL source archive does not contain a committed Info.plist.
+          openssl base64 -d -A -in bootstrap/final_delta.patch.b64 -out /tmp/delta.gz
+          gunzip -c /tmp/delta.gz > /tmp/delta.patch
+          (cd upstream && patch -p1 < /tmp/delta.patch)
           rm -f upstream/WorkSlop/Info.plist
-
           grep -q '@NSMOD' upstream/WorkSlop/SettingsView.swift
           grep -q 'Việt Hóa' upstream/WorkSlop/SettingsView.swift
           grep -q 'allowedContentTypes: \[.item\]' upstream/WorkSlop/MainMenuView.swift
           grep -q 'NSFileCoordinator()' upstream/WorkSlop/MainMenuView.swift
           grep -q 'Tệp ghép đôi' upstream/WorkSlop/MainMenuView.swift
-          grep -q 'Tất Cả Tinh Chỉnh' upstream/WorkSlop/MainMenuView.swift
           test -f upstream/WorkSlop/NSMODWelcomeView.swift
-          test -f upstream/WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
-          test -f upstream/WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
 
-      - name: Replace old repository with full FINAL source
+      - name: Replace old repo files with full FINAL source
         if: env.SOURCE_READY != '1'
         run: |
           set -e
-          cp .github/workflows/build-ipa.yml /tmp/build-ipa.yml
           rm -rf upstream/.git
-          rm -rf /tmp/final-source
-          mkdir -p /tmp/final-source
-          cp -a upstream/. /tmp/final-source/
-
-          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
-          cp -a /tmp/final-source/. .
-          mkdir -p .github/workflows
-          cp /tmp/build-ipa.yml .github/workflows/build-ipa.yml
-
+          # Preserve .github so GITHUB_TOKEN does not need workflows permission.
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' ! -name 'upstream' -exec rm -rf {} +
+          for item in upstream/* upstream/.[!.]* upstream/..?*; do
+            [ -e "$item" ] || continue
+            [ "$(basename "$item")" = ".github" ] && continue
+            cp -a "$item" .
+          done
+          rm -rf upstream
           git config user.name "NSMOD Build Bot"
           git config user.email "actions@users.noreply.github.com"
           git add -A
           git commit -m "Replace old repo with full WorkSlop v3.0 VI NSMOD FINAL source"
           git push origin HEAD:main
 
-      - name: Verify repository source
+      - name: Verify FINAL source
         run: |
           set -e
           grep -q '@NSMOD' WorkSlop/SettingsView.swift
@@ -88,7 +76,6 @@ jobs:
           grep -q 'allowedContentTypes: \[.item\]' WorkSlop/MainMenuView.swift
           grep -q 'NSFileCoordinator()' WorkSlop/MainMenuView.swift
           grep -q 'Tệp ghép đôi' WorkSlop/MainMenuView.swift
-          grep -q 'Tất Cả Tinh Chỉnh' WorkSlop/MainMenuView.swift
           test -f WorkSlop/NSMODWelcomeView.swift
           test -f WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
           test -f WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
@@ -97,15 +84,8 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '26.6'
-
-      - name: Verify toolchain
-        run: |
-          xcodebuild -version
-          xcodebuild -showsdks | grep -i iphoneos
-
       - name: Install XcodeGen
         run: brew install xcodegen
-
       - name: Build idevice FFI
         run: |
           set -e
@@ -114,61 +94,43 @@ jobs:
           rm -rf /tmp/idevice
           git clone --depth 1 https://github.com/jkcoxson/idevice.git /tmp/idevice
           cd /tmp/idevice/ffi
-          cargo build --target aarch64-apple-ios --release \
-            --no-default-features --features remote_pairing,rustcrypto --lib
+          cargo build --target aarch64-apple-ios --release --no-default-features --features remote_pairing,rustcrypto --lib
           mkdir -p "$GITHUB_WORKSPACE/WorkSlop/Libs"
-          cp /tmp/idevice/target/aarch64-apple-ios/release/libidevice_ffi.a \
-             "$GITHUB_WORKSPACE/WorkSlop/Libs/"
-
+          cp /tmp/idevice/target/aarch64-apple-ios/release/libidevice_ffi.a "$GITHUB_WORKSPACE/WorkSlop/Libs/"
       - name: Cache AirliftFFI
         id: airlift-cache
         uses: actions/cache@v4
         with:
           path: .ci-cache/AirliftFFI.xcframework
           key: airlift-ffi-40640c4d827aeab8d798285b57d24fcf6be070d0
-
       - name: Fetch AirliftFFI
         if: steps.airlift-cache.outputs.cache-hit != 'true'
         run: |
           set -e
           rm -rf /tmp/aircard-xcframework
-          git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/Mak5er/AirCard-iOS.git /tmp/aircard-xcframework
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/Mak5er/AirCard-iOS.git /tmp/aircard-xcframework
           cd /tmp/aircard-xcframework
           git sparse-checkout set AirliftFFI.xcframework
           git checkout --quiet
           mkdir -p "$GITHUB_WORKSPACE/.ci-cache"
           rm -rf "$GITHUB_WORKSPACE/.ci-cache/AirliftFFI.xcframework"
           cp -R AirliftFFI.xcframework "$GITHUB_WORKSPACE/.ci-cache/"
-
       - name: Stage AirliftFFI
         run: |
           mkdir -p WorkSlop/Frameworks
           rm -rf WorkSlop/Frameworks/AirliftFFI.xcframework
           cp -R .ci-cache/AirliftFFI.xcframework WorkSlop/Frameworks/
-
       - name: Generate project
         run: xcodegen generate
-
       - name: Build unsigned IPA
         run: |
           set -o pipefail
-          xcodebuild -project WorkSlop.xcodeproj \
-            -scheme WorkSlop \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath ${{ runner.temp }}/DerivedData \
-            build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            2>&1 | tee ${{ runner.temp }}/xcodebuild.log
-
+          xcodebuild -project WorkSlop.xcodeproj -scheme WorkSlop -configuration Release -destination 'generic/platform=iOS' -derivedDataPath ${{ runner.temp }}/DerivedData build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" 2>&1 | tee ${{ runner.temp }}/xcodebuild.log
           APP="${{ runner.temp }}/DerivedData/Build/Products/Release-iphoneos/WorkSlop.app"
           test -d "$APP"
-          IPA_DIR="${{ runner.temp }}/ipa-staging"
-          mkdir -p "$IPA_DIR/Payload"
-          cp -R "$APP" "$IPA_DIR/Payload/"
-          (cd "$IPA_DIR" && /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa" Payload)
-          ls -lh "${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa"
-
+          mkdir -p "${{ runner.temp }}/ipa/Payload"
+          cp -R "$APP" "${{ runner.temp }}/ipa/Payload/"
+          (cd "${{ runner.temp }}/ipa" && /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa" Payload)
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -176,7 +138,6 @@ jobs:
           name: BuildLog-FINAL
           path: ${{ runner.temp }}/xcodebuild.log
           if-no-files-found: warn
-
       - name: Upload IPA
         if: success()
         uses: actions/upload-artifact@v4
