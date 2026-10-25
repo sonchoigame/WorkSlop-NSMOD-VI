@@ -1,0 +1,117 @@
+name: Build FINAL IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout FINAL source
+        uses: actions/checkout@v4
+
+      - name: Verify FINAL source
+        run: |
+          set -e
+          grep -q '@NSMOD' WorkSlop/SettingsView.swift
+          grep -q 'Việt Hóa' WorkSlop/SettingsView.swift
+          grep -q 'allowedContentTypes: \[.item\]' WorkSlop/MainMenuView.swift
+          grep -q 'NSFileCoordinator()' WorkSlop/MainMenuView.swift
+          test -f WorkSlop/NSMODWelcomeView.swift
+          test -f WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
+          test -f WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
+
+      - name: Select Xcode 26
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.6'
+
+      - name: Verify toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build idevice FFI
+        run: |
+          set -e
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup target add aarch64-apple-ios
+          rm -rf /tmp/idevice
+          git clone --depth 1 https://github.com/jkcoxson/idevice.git /tmp/idevice
+          cd /tmp/idevice/ffi
+          cargo build --target aarch64-apple-ios --release \
+            --no-default-features --features remote_pairing,rustcrypto --lib
+          mkdir -p "$GITHUB_WORKSPACE/WorkSlop/Libs"
+          cp /tmp/idevice/target/aarch64-apple-ios/release/libidevice_ffi.a \
+             "$GITHUB_WORKSPACE/WorkSlop/Libs/"
+
+      - name: Cache AirliftFFI
+        id: airlift-cache
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/AirliftFFI.xcframework
+          key: airlift-ffi-40640c4d827aeab8d798285b57d24fcf6be070d0
+
+      - name: Fetch AirliftFFI
+        if: steps.airlift-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          rm -rf /tmp/aircard-xcframework
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/Mak5er/AirCard-iOS.git /tmp/aircard-xcframework
+          cd /tmp/aircard-xcframework
+          git sparse-checkout set AirliftFFI.xcframework
+          git checkout --quiet
+          mkdir -p "$GITHUB_WORKSPACE/.ci-cache"
+          rm -rf "$GITHUB_WORKSPACE/.ci-cache/AirliftFFI.xcframework"
+          cp -R AirliftFFI.xcframework "$GITHUB_WORKSPACE/.ci-cache/"
+
+      - name: Stage AirliftFFI
+        run: |
+          mkdir -p WorkSlop/Frameworks
+          rm -rf WorkSlop/Frameworks/AirliftFFI.xcframework
+          cp -R .ci-cache/AirliftFFI.xcframework WorkSlop/Frameworks/
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build unsigned IPA
+        run: |
+          set -o pipefail
+          xcodebuild -project WorkSlop.xcodeproj \
+            -scheme WorkSlop \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ${{ runner.temp }}/DerivedData \
+            build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee ${{ runner.temp }}/xcodebuild.log
+
+          APP="${{ runner.temp }}/DerivedData/Build/Products/Release-iphoneos/WorkSlop.app"
+          test -d "$APP"
+          IPA_DIR="${{ runner.temp }}/ipa-staging"
+          mkdir -p "$IPA_DIR/Payload"
+          cp -R "$APP" "$IPA_DIR/Payload/"
+          (cd "$IPA_DIR" && /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa" Payload)
+          ls -lh "${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BuildLog-FINAL
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: warn
+
+      - name: Upload IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkSlop-v3.0-VI-NSMOD-FINAL-IPA
+          path: ${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa
