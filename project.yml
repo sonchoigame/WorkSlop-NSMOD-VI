@@ -1,0 +1,82 @@
+name: WorkSlop
+options:
+  bundleIdPrefix: com.adnan120hz
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    from: 0.9.0
+targets:
+  WorkSlop:
+    type: application
+    platform: iOS
+    info:
+      path: WorkSlop/Info.plist
+      properties:
+        CFBundleName: WorkSlop
+        CFBundleDisplayName: WorkSlop
+        UILaunchScreen: {}
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.adnan120hz.workslop.tendies
+            UTTypeDescription: PosterBoard tendies package
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - tendies
+          - UTTypeIdentifier: com.adnan120hz.workslop.batter
+            UTTypeDescription: PosterBoard batter template
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - batter
+          - UTTypeIdentifier: com.adnan120hz.workslop.passthm
+            UTTypeDescription: AirFlit passcode theme
+            UTTypeConformsTo:
+              - public.zip-archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - passthm
+    sources:
+      - path: WorkSlop
+        excludes:
+          - iOS18Icons
+          - WorkSlop.entitlements
+          # CI-downloaded prebuilt (see .github/workflows/build-and-record.yml);
+          # never committed, excluded so xcodegen doesn't treat it as source.
+          - Frameworks
+      - path: WorkSlop/iOS18Icons
+        type: folder
+    dependencies:
+      - sdk: libsqlite3.tbd
+      - package: ZIPFoundation
+      # AirliftFFI (AirCard method, AirFlit menu). Downloaded by CI into
+      # WorkSlop/Frameworks/ before xcodegen runs. Xcode auto-selects the
+      # ios-arm64 slice for device builds. Swift code guards with
+      # #if canImport(AirliftFFI) so the target still compiles locally
+      # without the framework present.
+      - framework: WorkSlop/Frameworks/AirliftFFI.xcframework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.adnan120hz.workslop
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MARKETING_VERSION: "15.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # Private entitlements (mobilebackup/lockdown) are inert on stock iOS
+        # and honored under TrollStore/jailbreak. See WorkSlop.entitlements
+        # for the honest notes. Unsigned CI builds ignore this harmlessly.
+        CODE_SIGN_ENTITLEMENTS: WorkSlop/WorkSlop.entitlements
+  WorkSlopUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: WorkSlopUITests
+    dependencies:
+      - target: WorkSlop
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.adnan120hz.workslop.uitests

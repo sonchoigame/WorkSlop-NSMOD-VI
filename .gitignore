@@ -1,0 +1,10 @@
+# CI-downloaded, never committed (127 MB prebuilt)
+WorkSlop/Frameworks/
+# CI scratch cache
+.ci-cache/
+# Xcode
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+DerivedData/
+# macOS
+.DS_Store

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      WorkSlop entitlements — HONEST NOTES (baca sebelum "memperbaiki"):
+
+      1. Aplikasi ini bicara ke lockdownd/mobilebackup2 lewat TCP loopback
+         (127.0.0.1:62078) melalui aplikasi tunnel yang diinstal user
+         (LocalDevVPN). TCP polos TIDAK butuh entitlement — sama seperti
+         SideStore, yang aplikasi utamanya "a just regular, sandboxed iOS
+         application" (SideStore README); tunnel-nya sendiri tinggal di
+         aplikasi TERPISAH (LocalDevVPN) yang membawa entitlement
+         NetworkExtension. GoldenNugget juga tidak memakai private
+         entitlements.
+
+      2. Key com.apple.private.* di bawah ini DIABAIKAN di iOS stock
+         kecuali binary ditandatangani Apple (atau diinstal via TrollStore
+         — yang menghormati custom entitlements lewat CoreTrust bypass —
+         atau di device jailbreak). Key ini disimpan di sini agar instalasi
+         TrollStore mendapatkannya; di sideload stock sifatnya inert,
+         tidak merusak apa pun.
+    -->
+    <key>com.apple.private.mobilebackup.allow-full-backup</key>
+    <true/>
+    <!-- Diminta untuk akses lockdownd. UNVERIFIED: tidak ada referensi
+         publik yang mengonfirmasi key persis ini ada. Disimpan sesuai
+         permintaan project; inert di iOS stock. -->
+    <key>com.apple.private.lockdown.enable-ssh</key>
+    <true/>
+</dict>
+</plist>
