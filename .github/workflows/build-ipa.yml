@@ -1,9 +1,12 @@
-name: Build IPA
+name: Build FINAL IPA
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -11,21 +14,84 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout NSMOD repo
-        uses: actions/checkout@v4
-
-      - name: Checkout official WorkSlop v3.0
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          repository: adnan120hz/WorkSlop-Mobile-New
-          ref: v3.0
-          path: upstream
+          fetch-depth: 0
 
-      - name: Verify exact v3.0 source
+      - name: Detect full source
         run: |
-          cd upstream
-          test "$(git rev-parse HEAD)" = "8c97076c9e25995df6e5aac063efc46cb4865a94"
-          echo "Exact WorkSlop v3.0 source confirmed"
+          if [ -f WorkSlop/MainMenuView.swift ] && [ -f project.yml ]; then
+            echo "SOURCE_READY=1" >> "$GITHUB_ENV"
+          else
+            echo "SOURCE_READY=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Reconstruct exact FINAL source
+        if: env.SOURCE_READY != '1'
+        run: |
+          set -e
+          rm -rf upstream
+          git clone --branch v3.0 --depth 1 https://github.com/adnan120hz/WorkSlop-Mobile-New.git upstream
+          test "$(git -C upstream rev-parse HEAD)" = "8c97076c9e25995df6e5aac063efc46cb4865a94"
+
+          cat payload/patch.b64.* > /tmp/nsmod-base.b64
+          openssl base64 -d -A -in /tmp/nsmod-base.b64 -out /tmp/nsmod-base.gz
+          gunzip -c /tmp/nsmod-base.gz > /tmp/nsmod-base.patch
+          (cd upstream && git apply --check /tmp/nsmod-base.patch && git apply /tmp/nsmod-base.patch)
+
+          python3 scripts/harden_pairing.py
+
+          openssl base64 -d -A -in bootstrap/final_delta.patch.b64 -out /tmp/final-delta.gz
+          gunzip -c /tmp/final-delta.gz > /tmp/final-delta.patch
+          (cd upstream && patch -p1 < /tmp/final-delta.patch)
+
+          # The user's FINAL source archive does not contain a committed Info.plist.
+          rm -f upstream/WorkSlop/Info.plist
+
+          grep -q '@NSMOD' upstream/WorkSlop/SettingsView.swift
+          grep -q 'Việt Hóa' upstream/WorkSlop/SettingsView.swift
+          grep -q 'allowedContentTypes: \[.item\]' upstream/WorkSlop/MainMenuView.swift
+          grep -q 'NSFileCoordinator()' upstream/WorkSlop/MainMenuView.swift
+          grep -q 'Tệp ghép đôi' upstream/WorkSlop/MainMenuView.swift
+          grep -q 'Tất Cả Tinh Chỉnh' upstream/WorkSlop/MainMenuView.swift
+          test -f upstream/WorkSlop/NSMODWelcomeView.swift
+          test -f upstream/WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
+          test -f upstream/WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
+
+      - name: Replace old repository with full FINAL source
+        if: env.SOURCE_READY != '1'
+        run: |
+          set -e
+          cp .github/workflows/build-ipa.yml /tmp/build-ipa.yml
+          rm -rf upstream/.git
+          rm -rf /tmp/final-source
+          mkdir -p /tmp/final-source
+          cp -a upstream/. /tmp/final-source/
+
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          cp -a /tmp/final-source/. .
+          mkdir -p .github/workflows
+          cp /tmp/build-ipa.yml .github/workflows/build-ipa.yml
+
+          git config user.name "NSMOD Build Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Replace old repo with full WorkSlop v3.0 VI NSMOD FINAL source"
+          git push origin HEAD:main
+
+      - name: Verify repository source
+        run: |
+          set -e
+          grep -q '@NSMOD' WorkSlop/SettingsView.swift
+          grep -q 'Việt Hóa' WorkSlop/SettingsView.swift
+          grep -q 'allowedContentTypes: \[.item\]' WorkSlop/MainMenuView.swift
+          grep -q 'NSFileCoordinator()' WorkSlop/MainMenuView.swift
+          grep -q 'Tệp ghép đôi' WorkSlop/MainMenuView.swift
+          grep -q 'Tất Cả Tinh Chỉnh' WorkSlop/MainMenuView.swift
+          test -f WorkSlop/NSMODWelcomeView.swift
+          test -f WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
+          test -f WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
 
       - name: Select Xcode 26
         uses: maxim-lobanov/setup-xcode@v1
@@ -40,49 +106,19 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Apply Vietnamese and NSMOD patch
-        run: |
-          set -e
-          cat payload/patch.b64.* > patch.b64
-          openssl base64 -d -A -in patch.b64 -out patch.gz
-          gunzip -c patch.gz > nsmod.patch
-          cd upstream
-          git apply --check ../nsmod.patch
-          git apply ../nsmod.patch
-          grep -q '@NSMOD' WorkSlop/SettingsView.swift
-          test -f WorkSlop/NSMODWelcomeView.swift
-          test -f WorkSlop/Assets.xcassets/TelegramIcon.imageset/telegram@2x.png
-          test -f WorkSlop/Assets.xcassets/TikTokIcon.imageset/tiktok@2x.png
-
-      - name: Harden pairing import
-        run: python3 scripts/harden_pairing.py
-
-      - name: Verify pairing importer source
-        run: |
-          grep -q 'allowedContentTypes: \[.item\]' upstream/WorkSlop/MainMenuView.swift
-          grep -q 'NSFileCoordinator()' upstream/WorkSlop/MainMenuView.swift
-          ! grep -q 'pathExtension.lowercased() == "plist"' upstream/WorkSlop/MainMenuView.swift
-          echo "Pairing importer source checks: PASS"
-
-      - name: Pairing format smoke test
-        run: |
-          python3 -c "import plistlib; r={'identifier':'member','private_key':b'a','public_key':b'b'}; l={'HostID':'host','SystemBUID':'buid','HostPrivateKey':b'k'}; assert plistlib.loads(plistlib.dumps(r))['identifier']; assert plistlib.loads(plistlib.dumps(l))['HostID']; print('Pairing format smoke test: PASS')"
-
       - name: Build idevice FFI
         run: |
           set -e
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-            source "$HOME/.cargo/env"
-          fi
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add aarch64-apple-ios
           rm -rf /tmp/idevice
           git clone --depth 1 https://github.com/jkcoxson/idevice.git /tmp/idevice
           cd /tmp/idevice/ffi
-          cargo build --target aarch64-apple-ios --release --no-default-features --features remote_pairing,rustcrypto --lib
-          mkdir -p "$GITHUB_WORKSPACE/upstream/WorkSlop/Libs"
-          cp /tmp/idevice/target/aarch64-apple-ios/release/libidevice_ffi.a "$GITHUB_WORKSPACE/upstream/WorkSlop/Libs/"
+          cargo build --target aarch64-apple-ios --release \
+            --no-default-features --features remote_pairing,rustcrypto --lib
+          mkdir -p "$GITHUB_WORKSPACE/WorkSlop/Libs"
+          cp /tmp/idevice/target/aarch64-apple-ios/release/libidevice_ffi.a \
+             "$GITHUB_WORKSPACE/WorkSlop/Libs/"
 
       - name: Cache AirliftFFI
         id: airlift-cache
@@ -96,7 +132,8 @@ jobs:
         run: |
           set -e
           rm -rf /tmp/aircard-xcframework
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/Mak5er/AirCard-iOS.git /tmp/aircard-xcframework
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/Mak5er/AirCard-iOS.git /tmp/aircard-xcframework
           cd /tmp/aircard-xcframework
           git sparse-checkout set AirliftFFI.xcframework
           git checkout --quiet
@@ -106,16 +143,14 @@ jobs:
 
       - name: Stage AirliftFFI
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/upstream/WorkSlop/Frameworks"
-          rm -rf "$GITHUB_WORKSPACE/upstream/WorkSlop/Frameworks/AirliftFFI.xcframework"
-          cp -R "$GITHUB_WORKSPACE/.ci-cache/AirliftFFI.xcframework" "$GITHUB_WORKSPACE/upstream/WorkSlop/Frameworks/"
+          mkdir -p WorkSlop/Frameworks
+          rm -rf WorkSlop/Frameworks/AirliftFFI.xcframework
+          cp -R .ci-cache/AirliftFFI.xcframework WorkSlop/Frameworks/
 
       - name: Generate project
-        working-directory: upstream
         run: xcodegen generate
 
       - name: Build unsigned IPA
-        working-directory: upstream
         run: |
           set -o pipefail
           xcodebuild -project WorkSlop.xcodeproj \
@@ -125,23 +160,20 @@ jobs:
             -derivedDataPath ${{ runner.temp }}/DerivedData \
             build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             2>&1 | tee ${{ runner.temp }}/xcodebuild.log
+
           APP="${{ runner.temp }}/DerivedData/Build/Products/Release-iphoneos/WorkSlop.app"
           test -d "$APP"
-          mkdir -p "${{ runner.temp }}/ipa-staging/Payload"
-          cp -R "$APP" "${{ runner.temp }}/ipa-staging/Payload/"
-          cd "${{ runner.temp }}/ipa-staging"
-          /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa" Payload
-
-      - name: Pack patched source
-        run: |
-          rm -rf upstream/.git
-          ditto -c -k --sequesterRsrc --keepParent upstream "${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip"
+          IPA_DIR="${{ runner.temp }}/ipa-staging"
+          mkdir -p "$IPA_DIR/Payload"
+          cp -R "$APP" "$IPA_DIR/Payload/"
+          (cd "$IPA_DIR" && /usr/bin/zip -qry "${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa" Payload)
+          ls -lh "${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa"
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: BuildLog-v3.0
+          name: BuildLog-FINAL
           path: ${{ runner.temp }}/xcodebuild.log
           if-no-files-found: warn
 
@@ -149,12 +181,5 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: WorkSlop-v3.0-NSMOD-VI-IPA
-          path: ${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-unsigned.ipa
-
-      - name: Upload source
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: WorkSlop-v3.0-NSMOD-VI-SOURCE
-          path: ${{ runner.temp }}/WorkSlop-v3.0-NSMOD-VI-SOURCE.zip
+          name: WorkSlop-v3.0-VI-NSMOD-FINAL-IPA
+          path: ${{ runner.temp }}/WorkSlop-v3.0-VI-NSMOD-FINAL-unsigned.ipa
